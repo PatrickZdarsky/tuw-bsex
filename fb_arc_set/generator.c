@@ -1,6 +1,6 @@
 #include "fbArcSetCommon.h"
 
-static void writeError(char*[], bool);
+static void writeError(char[], bool);
 void handle_signal(int);
 static int parseEdges(char*[], int, edge parsed[]);
 static void shuffle(int[], int);
@@ -20,6 +20,13 @@ sem_t *semFree;
 sem_t *semUsed;
 sem_t *semBlocked;
 
+/**
+ * @brief The main entrypoint of the program
+ * 
+ * @param argc The amount of arguments which were passed to the program
+ * @param argv The arguments which were passed to the program
+ * @return int The program status code
+ */
 int main(int argc, char *argv[]) {
     programName = argv[0];
 
@@ -39,8 +46,7 @@ int main(int argc, char *argv[]) {
     }
 
     //Initialize the pseudo-random number generator with seed
-    struct timespec t;
-    srand(((long) getpid()) * 1000000000 + t.tv_nsec);
+    srand(time(NULL) ^ getpid());
 
     setup();
 
@@ -48,11 +54,12 @@ int main(int argc, char *argv[]) {
         //Wait for supervisor to become ready...
     }
 
-    printf("Starting generator\n");
     edge fbArcSet[edgeCount];
     int fbCount, bestFbCount = 100;
     while (data->state == 1) {
+        shuffle(nodes, nodeCount);
         fbCount = findFbArcSet(nodeCount, nodes, edgeCount, edges, fbArcSet);
+
         //Check if our current solution is trash
         if (fbCount >= bestFbCount)
             continue;
@@ -60,7 +67,12 @@ int main(int argc, char *argv[]) {
         //We have found the best solution this generator has produced yet => post it to the supervisor
         bestFbCount = fbCount;
 
-        printf("Got solution, waiting for blocked semaphore... ");
+        printf("[%s] Got new solution with %d edges:", programName, fbCount);
+        for (int i=0; i<fbCount; i++) {
+            printf(" %d-%d", fbArcSet[i].node1, fbArcSet[i].node1);
+        }
+        printf("\n");
+
         if (sem_wait(semBlocked) == -1) {
             writeError("Error while 'blocked' semaphore is waiting", false);
             teardown();
@@ -73,20 +85,18 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        printf("done; waiting for free semaphore... ");
         if (sem_wait(semFree) == -1) {
+            writeError("Error while 'free' semaphore is waiting", false);
+
             sem_post(semBlocked);
             sem_post(semUsed);
 
             if (errno != EINTR)
             {
-                writeError("Error while 'free' semaphore is waiting", false);
                 teardown();
                 exit(EXIT_FAILURE);
             }
         }
-
-        printf("done; \nWriting to shm writerPos: %d edgeCount: %d\n", data->writerPosition, fbCount);
 
         data->buffer[data->writerPosition].edgeCount = fbCount;
         for (int i=0; i<fbCount; i++) {
@@ -98,8 +108,6 @@ int main(int argc, char *argv[]) {
 
         sem_post(semUsed);
         sem_post(semBlocked);
-
-        shuffle(nodes, nodeCount);
     }
 
     teardown();
@@ -107,6 +115,16 @@ int main(int argc, char *argv[]) {
     return EXIT_SUCCESS;
 }
 
+/**
+ * @brief Finds a new fb arc set for the given graph
+ * 
+ * @param nodeCount The amount of nodes in the graph
+ * @param nodes The nodes, with the given oder
+ * @param edgeCount The amount of edges in the graph
+ * @param edges The edges of the graph
+ * @param result An array where the resulting edges are stored
+ * @return int The amount of edges which should be removed
+ */
 static int findFbArcSet(int nodeCount, int nodes[nodeCount], int edgeCount, edge edges[edgeCount], edge result[8]) {
     int fbCount = 0;
 
@@ -123,47 +141,6 @@ static int findFbArcSet(int nodeCount, int nodes[nodeCount], int edgeCount, edge
     }
 
     return fbCount;
-}
-
-/**
- * @brief Parses the supplied edges directly from program arguments
- * 
- * @param inputEdges The program arguments array
- * @param count The number of arguments in the array
- * @param parsed The array, where the parsed edges will be saved
- * @return int The id of the node with the highest value
- */
-static int parseEdges(char *inputEdges[], int count, edge parsed[count-1]) {
-    int highestNode = 0;
-
-    for (int i=1; i<count; i++) {
-        int edgeIndex = i-1;
-
-        errno = 0; // To distinguish success/failure after call
-        long node1 = strtol(inputEdges[i], NULL, 10);
-        if ((node1 == LONG_MIN || node1 == LONG_MAX) && errno == ERANGE) {
-            writeError("Could not parse supplied edges", false);
-            exit(EXIT_FAILURE);
-        }
-        parsed[edgeIndex].node1 = (int) node1;
-
-        
-        char *sndNodePtr = strstr(inputEdges[i], "-") + 1; // Find '-' and skip it
-        errno = 0;
-        long node2 = strtol(sndNodePtr, NULL, 10);
-        if ((node2 == LONG_MIN || node2 == LONG_MAX) && errno == ERANGE) {
-            writeError("Could not parse supplied edges", false);
-            exit(EXIT_FAILURE);
-        }
-        parsed[edgeIndex].node2 = (int) node2;
-
-        if (parsed[edgeIndex].node1 > highestNode)
-            highestNode = parsed[edgeIndex].node1;
-        if (parsed[edgeIndex].node2 > highestNode)
-            highestNode = parsed[edgeIndex].node2;
-    }
-
-    return highestNode;
 }
 
 /**
@@ -204,13 +181,68 @@ static bool isInOrder(int node1, int node2, int nodes[], int nodeCount) {
         else if (nodes[i] == node2)
             index2 = i;
 
-        if (index1 != -1 && index1 != -1)
+        if (index1 != -1 && index2 != -1)
             break;
     }
 
     return index1 < index2;
 }
 
+/**
+ * @brief Parses the supplied edges directly from program arguments
+ * 
+ * @param inputEdges The program arguments array
+ * @param count The number of arguments in the array
+ * @param parsed The array, where the parsed edges will be saved
+ * @return int The id of the node with the highest value
+ */
+static int parseEdges(char *inputEdges[], int count, edge parsed[count-1]) {
+    int highestNode = 0;
+
+    for (int i=1; i<count; i++) {
+        int edgeIndex = i-1;
+        char *endptr = NULL; 
+        errno = 0; // To distinguish success/failure after call
+
+        long node1 = strtol(inputEdges[i], &endptr, 10);
+        if (inputEdges[i] == endptr || ((node1 == LONG_MIN || node1 == LONG_MAX) && errno == ERANGE)) {
+            writeError("Could not parse supplied edges", false);
+            exit(EXIT_FAILURE);
+        }
+        parsed[edgeIndex].node1 = (int) node1;
+
+        
+        char *sndNodePtr = strstr(inputEdges[i], "-");
+        if (sndNodePtr == NULL) {
+            writeError("Could not parse supplied edges", false);
+            exit(EXIT_FAILURE);
+        }
+        sndNodePtr += 1; //skip '-'
+
+        errno = 0;
+        endptr = NULL;
+
+        long node2 = strtol(sndNodePtr, &endptr, 10);
+        if (sndNodePtr == endptr || ((node2 == LONG_MIN || node2 == LONG_MAX) && errno == ERANGE)) {
+            writeError("Could not parse supplied edges", false);
+            exit(EXIT_FAILURE);
+        }
+        parsed[edgeIndex].node2 = (int) node2;
+
+        if (parsed[edgeIndex].node1 > highestNode)
+            highestNode = parsed[edgeIndex].node1;
+        if (parsed[edgeIndex].node2 > highestNode)
+            highestNode = parsed[edgeIndex].node2;
+    }
+
+    return highestNode+1;
+}
+
+/**
+ * @brief Handles any signals from the operating system
+ * 
+ * @param signal The signal which was sent to the program
+ */
 void handle_signal(int signal) { 
     if (shmSetupState == 3) {
         data->state = 2;
@@ -218,6 +250,10 @@ void handle_signal(int signal) {
     }
 }
 
+/**
+ * @brief Sets the shared memory up and the semaphores
+ * 
+ */
 static void setup() {
     shmfd = shm_open(SHM_NAME, O_RDWR, 0600);
 
@@ -250,6 +286,10 @@ static void setup() {
     }
 }
 
+/**
+ * @brief Properly closes the shared memory and the semaphores
+ * 
+ */
 static void teardown() {
 
     switch (shmSetupState) {
@@ -278,8 +318,14 @@ static void teardown() {
     }
 }
 
-static void writeError(char* errMessage[], bool errnoUsed) {
-    fprintf(stderr, "%s: %s", programName, errMessage);
+/**
+ * @brief Writes an error to the stderr output
+ * 
+ * @param errMessage The message to describe the error
+ * @param errnoUsed If the errno variable should be printed
+ */
+static void writeError(char errMessage[], bool errnoUsed) {
+    fprintf(stderr, "[%s] %s", programName, errMessage);
     if (errnoUsed)
         fprintf(stderr, ": %s", strerror(errno));
     fprintf(stderr, "\n");

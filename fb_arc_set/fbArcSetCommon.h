@@ -21,7 +21,7 @@
 #define SEM_FREE_NAME "/fb_arc_set_shm_12123697_SEM_FREE"
 #define SEM_USED_NAME "/fb_arc_set_shm_12123697_SEM_USED"
 #define SEM_BLOCKED_NAME "/fb_arc_set_shm_12123697_SEM_BLOCKED"
-#define BUFFER_SIZE (24)
+#define BUFFER_SIZE (16)
 
 typedef struct edge {
     int node1;
